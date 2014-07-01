@@ -1,0 +1,187 @@
+# created and modified by Saeid Bagheri, Nov 2013
+
+########################################################################
+# The function that chooses a random client to communicate with
+#it sends 20 requests, and generates data with a probabillity
+def call_from_above():
+    chance=randomfloat()
+    if chance<=mycontext['freq'] and mycontext['sentfile']<20:
+        print("ready to send data...\n")
+        #randomly choose a dest_ip
+        rnd=randomfloat()
+        ind=int(rnd*mycontext['clientNum'])
+        mycontext['chosen_ip']=mycontext['dest_ips'][ind-1]
+        print "the client that I want to communicate with is : "+str(mycontext['chosen_ip'])+"\n"
+        mycontext['DataToSend']=True
+    elif mycontext['sentfile']>=20: 
+        print "total files sent = "+str(mycontext['sentfile'])
+        print "total files received = "+str(mycontext['rcvfile'])
+        print "total finishes after sending = "+str(mycontext['finishsent'])
+        print "total polls from server = "+str(mycontext['pollnumber'])
+
+########################################################################
+#To recover from an error occured while establishing TCP connection
+def recover():
+    print "TCP connection failed!"
+    print "total files sent = "+str(mycontext['sentfile'])
+    print "total files received = "+str(mycontext['rcvfile'])
+    print "total finishes after sending = "+str(mycontext['finishsent'])
+    print "total polls from server = "+str(mycontext['pollnumber'])
+    mycontext['DataToSend']=False
+    print "Going back into original state\n*************************************************\n"
+    #closing prior sockets and listeners and openning new TCP port
+    stopcomm(mycontext['TCP_listener'])
+    stopcomm(mycontext['UDP_listener'])
+    mycontext['UDP_listener']=recvmess(mycontext['myip'],mycontext['myport'],UDPcheck_ans)
+    mycontext['TCP_listener']=waitforconn(mycontext['myip'],mycontext['myport'],TCPcheck_ans)
+    call_from_above()
+
+########################################################################
+#A function to get the global time
+def get_global_time():
+    return mycontext['startTime']+(getruntime()-mycontext['sRuntime'])
+
+########################################################################
+#The function to check the messages receive by UDP connection
+def UDPcheck_ans(ip, port, msg, listener):
+    print("checking UDP answer\n")
+    mycontext['statelock'].acquire()
+    #if the TPC connection is from master
+    #check to see if it's a start message
+    if ip==mycontext['M_ip']:
+        print "message received form master :"+msg
+        if msg=="Start" and mycontext['DataToSend']==True:
+            mycontext['pollnumber']=mycontext['pollnumber']+1
+            mycontext['statelock'].release()
+            send_file(mycontext['chosen_ip'],mycontext['myport'])
+        elif msg=="Start" and mycontext['DataToSend']==False:
+            print "No data to send, sending skip to master"
+            mycontext['statelock'].release()
+            sendmess(mycontext['M_ip'],mycontext['myport'],"Skip")
+            call_from_above()
+    #if the TPC connection is not from the master
+    #release the lock
+    else:
+        mycontext['statelock'].release()
+
+########################################################################
+#The function to check the messages receive by TCP connection
+def TCPcheck_ans(ip,port,sockrcv, thiscommhandle,listencommhandle):
+    mycontext['statelock'].acquire()
+    try:
+        print("checking TCP answer")
+        msg=sockrcv.recv(200)
+        print "A message receive from a client :"+msg+"\n_________________________________________"
+        sockrcv.close()
+        mycontext['rcvfile']=mycontext['rcvfile']+1
+    except:
+        recover()
+    mycontext['statelock'].release()
+
+########################################################################
+# The function to send finish message to master           
+def send_finish():
+    try:
+        print "sending finish...."
+        sendmess(mycontext['M_ip'],mycontext['myport'],"Finish")
+        mycontext['finishsent']=mycontext['finishsent']+1
+        print "Done sending finish, TCP is waiting for connection\n>>>>>>>>>>>>>>>>>>>sent<<<<<<<<<<<<<<<<<<<<<<"
+        mycontext['TCP_listener']=waitforconn(mycontext['myip'],mycontext['myport'],TCPcheck_ans)
+        mycontext['DataToSend']=False
+        print "total files sent = "+str(mycontext['sentfile'])
+        print "total files received = "+str(mycontext['rcvfile'])
+        print "total finishes after sending = "+str(mycontext['finishsent'])
+        print "total polls from server = "+str(mycontext['pollnumber'])
+        call_from_above()
+    except:
+        recover()
+
+########################################################################
+# The function to compose and send a message to another client
+#using TCP connection            
+def send_file(dest_ip, port):
+    try:
+        mycontext['statelock'].acquire()
+        print("sending file to "+dest_ip+"....."+str(port)+"...")
+        stopcomm(mycontext['TCP_listener'])
+        mycontext['TCP_socket']=openconn(dest_ip,port,mycontext['myip'],mycontext['myport'],20)
+        print "TCP connection opened"
+        time=get_global_time()
+        msg="This message contains my IP address: "+mycontext['myip']+" at time "+str(time) +"I started sending this message"
+        print "the message is :"+msg
+        msg_size=mycontext['TCP_socket'].send(msg)
+        isClosed=mycontext['TCP_socket'].close()
+        print "sending finish msg, is the last connection closed? "+ str(isClosed)
+        mycontext['sentfile']=mycontext['sentfile']+1
+        send_finish()
+        mycontext['statelock'].release()
+    except:
+        mycontext['statelock'].release()
+        recover()
+        
+
+########################################################################        
+# this unpacks the data from the packet and changes it to a float
+def convert_timestamp_to_float(timestamp):
+    integerpart = (ord(timestamp[0])<<24) + (ord(timestamp[1])<<16) + (ord(timestamp[2])<<8) + (ord(timestamp[3]))
+    floatpart = (ord(timestamp[4])<<24) + (ord(timestamp[5])<<16) + (ord(timestamp[6])<<8) + (ord(timestamp[7]))
+    return integerpart + floatpart / float(2**32)
+
+########################################################################
+# decode the time packet
+def decode_NTP_packet(ip, port, mess, ch):
+    mycontext['sRuntime'] = getruntime() # runtime of the server
+    print "From "+str(ip)+":"+str(port)+", I received NTP data."
+    print "NTP Reference Identifier:",mess[12:16]
+    mycontext['startTime'] = convert_timestamp_to_float(mess[40:48])
+    print "NTP Transmit Time (in seconds since Jan 1st, 1900):", mycontext['startTime']
+    stopcomm(ch)
+
+##########################
+# Main program starts here
+##########################
+if callfunc=='initialize':
+    mycontext['DataToSend']=False
+    mycontext['sentfile']=0
+    mycontext['rcvfile']=0
+    mycontext['finishsent']=0
+    mycontext['pollnumber']=0
+    # The frequency at which the client sends data ( between 50% and 100%)
+    rnd=randomfloat()
+    mycontext['freq']=(rnd*0.5)+0.5
+    print "data frequency on this client is %"+ str(mycontext['freq']*100)
+    
+    # Set up mutex to handle race conditions
+    mycontext['statelock'] = getlock() 
+    
+    mycontext['myip'] = getmyip()
+    mycontext['M_ip'] = "128.208.4.199"
+    mycontext['myport'] = 63132
+    mycontext['chosen_ip']=0
+    mycontext['dest_ips']=['155.185.54.250','193.167.187.186','13.7.64.22','129.107.35.131'] 
+    mycontext['clientNum'] = len(mycontext['dest_ips'])
+    try:
+        #get and set the time stamps for the log file 
+        timeservers = ["time-a.nist.gov", "time-b.nist.gov", "time-a.timefreq.bldrdoc.gov", "time-b.timefreq.bldrdoc.gov", "time-c.timefreq.bldrdoc.gov", "utcnist.colorado.edu", "time.nist.gov", "nist1.symmetricom.com", "nist1-ny.WiTime.net", "nist.expertsmi.com", "nist.netservicesgroup.com"]
+        servername = timeservers[int(randomfloat()*len(timeservers))]
+
+        print "Using: ", servername
+        ntp_request_string = chr(27)+chr(0)*47 # request message
+        UDP_handle=recvmess(getmyip(),mycontext['myport'], decode_NTP_packet)
+        sendmess(servername,123, ntp_request_string, getmyip(), mycontext['myport']) # port 123 is used for NTP
+        sleep(3) # wait for the message from the time servers
+        stopcomm(UDP_handle)
+        #get and set the time stamps for the log file --# END
+        
+        for i in mycontext['dest_ips']:
+            if i==mycontext['myip']:
+                mycontext['dest_ips'].remove(i)
+        print mycontext['dest_ips']
+    except:
+        print "connection to time server failed!"
+        mycontext['sRuntime']=0
+        mycontext['startTime']=0
+        
+    call_from_above()
+    mycontext['UDP_listener']=recvmess(mycontext['myip'],mycontext['myport'],UDPcheck_ans)
+    mycontext['TCP_listener']=waitforconn(mycontext['myip'],mycontext['myport'],TCPcheck_ans)
